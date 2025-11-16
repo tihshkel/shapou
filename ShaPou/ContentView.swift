@@ -227,6 +227,12 @@ struct MenuButton: View {
     }
 }
 
+// Типы одежды
+enum ClothingType {
+    case hat
+    case glasses
+}
+
 struct GameView: View {
     @Binding var showGame: Bool
     @State private var currentRoomIndex = 0
@@ -235,6 +241,8 @@ struct GameView: View {
     @State private var showWashingGame = false // Флаг для показа мини-игры мытья
     @State private var showNotHungryDialog = false // Флаг для показа диалога "не голоден"
     @State private var showWashDialog = false // Флаг для показа диалога "я чистый"
+    @State private var showWearingInterface = false // Флаг для показа интерфейса выбора одежды
+    @State private var selectedClothing: ClothingType? = nil // Выбранная одежда
     
     // Значения прогресс-баров (0.0 - 1.0) - начинаем с максимума
     @State private var emotionValue: Double = 1.0
@@ -252,8 +260,60 @@ struct GameView: View {
     private let decreaseRate: Double = 0.01 // Уменьшение на 1% каждую секунду
     private let timerInterval: TimeInterval = 1.0 // Обновление каждую секунду
     
-    // Список комнат
-    private let rooms = ["background-game", "kitchen-game", "bathroom-game"]
+    // Список комнат: главная (0), кухня (1), ванная (2), гардероб (3)
+    private let rooms = ["background-game", "kitchen-game", "bathroom-game", "wear-game"]
+    
+    // Проверка, можно ли перейти влево
+    private var canGoLeft: Bool {
+        if currentRoomIndex == 0 { // Из главной можно влево в ванную
+            return true
+        } else if currentRoomIndex == 1 { // Из кухни можно влево в главную
+            return true
+        } else if currentRoomIndex == 2 { // Из ванной можно влево в гардероб
+            return true
+        } else if currentRoomIndex == 3 { // Из гардероба нельзя влево
+            return false
+        }
+        return false
+    }
+    
+    // Проверка, можно ли перейти вправо
+    private var canGoRight: Bool {
+        if currentRoomIndex == 0 { // Из главной можно вправо в кухню
+            return true
+        } else if currentRoomIndex == 1 { // Из кухни нельзя вправо
+            return false
+        } else if currentRoomIndex == 2 { // Из ванной можно вправо в главную
+            return true
+        } else if currentRoomIndex == 3 { // Из гардероба можно вправо в ванную
+            return true
+        }
+        return false
+    }
+    
+    // Получить индекс следующей комнаты влево
+    private func getLeftRoomIndex() -> Int? {
+        if currentRoomIndex == 0 { // Из главной влево -> ванная (2)
+            return 2
+        } else if currentRoomIndex == 1 { // Из кухни влево -> главная (0)
+            return 0
+        } else if currentRoomIndex == 2 { // Из ванной влево -> гардероб (3)
+            return 3
+        }
+        return nil
+    }
+    
+    // Получить индекс следующей комнаты вправо
+    private func getRightRoomIndex() -> Int? {
+        if currentRoomIndex == 0 { // Из главной вправо -> кухня (1)
+            return 1
+        } else if currentRoomIndex == 2 { // Из ванной вправо -> главная (0)
+            return 0
+        } else if currentRoomIndex == 3 { // Из гардероба вправо -> ванная (2)
+            return 2
+        }
+        return nil
+    }
     
     var body: some View {
         ZStack {
@@ -346,45 +406,105 @@ struct GameView: View {
                 Spacer()
                 
                 // Персонаж (меняется в зависимости от параметров) - показывается везде
-                Group {
-                    let minValue = min(emotionValue, hungerValue, washingValue)
-                    let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
+                ZStack {
+                    Group {
+                        let minValue = min(emotionValue, hungerValue, washingValue)
+                        let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
+                        
+                        if hasZero {
+                            // Злой персонаж - когда хотя бы один параметр на нуле
+                            Image("angry-shapou")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 300, height: 300)
+                                .padding(.bottom, 20)
+                                .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        } else if minValue <= 0.5 {
+                            // Грустный персонаж - когда параметры ухудшились
+                            Image("sad-shapou")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 300, height: 300)
+                                .padding(.bottom, 20)
+                                .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        } else {
+                            // Нормальный персонаж - когда все параметры в норме
+                            Image("normal-shapou")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 300, height: 300)
+                                .padding(.bottom, 20)
+                                .transition(.scale(scale: 0.8).combined(with: .opacity))
+                        }
+                    }
+                    .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
+                    .offset(x: isRolling && !isOutside ? rollDirection * UIScreen.main.bounds.width * 0.3 : 0)
+                    .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
+                    .animation(.easeInOut(duration: 0.6), value: isRolling)
+                    .animation(.easeInOut(duration: 0.6), value: rollDirection)
+                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
                     
-                    if hasZero {
-                        // Злой персонаж - когда хотя бы один параметр на нуле
-                        Image("angry-shapou")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 300, height: 300)
-                            .padding(.bottom, 20)
-                            .transition(.scale(scale: 0.8).combined(with: .opacity))
-                    } else if minValue <= 0.5 {
-                        // Грустный персонаж - когда параметры ухудшились
-                        Image("sad-shapou")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 300, height: 300)
-                            .padding(.bottom, 20)
-                            .transition(.scale(scale: 0.8).combined(with: .opacity))
-                    } else {
-                        // Нормальный персонаж - когда все параметры в норме
-                        Image("normal-shapou")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 300, height: 300)
-                            .padding(.bottom, 20)
-                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    // Одежда на персонаже (показывается когда выбрана, даже если интерфейс закрыт)
+                    if let clothing = selectedClothing {
+                        // Шляпа сверху
+                        if clothing == .hat {
+                            Image("hat-wear")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 200, height: 200)
+                                .offset(y: -120)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                        
+                        // Очки
+                        if clothing == .glasses {
+                            Image("glases-wear")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 180, height: 180)
+                                .offset(y: -50)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                    }
+                    
+                    // Стрелки для выбора одежды (только в гардеробной и когда показывается интерфейс)
+                    if currentRoomIndex == 3 && showWearingInterface {
+                        // Стрелка вверх для шляпы (сверху от персонажа)
+                        Button(action: {
+                            withAnimation {
+                                selectedClothing = .hat
+                                emotionValue = min(1.0, emotionValue + 0.1)
+                            }
+                        }) {
+                            Image(systemName: "chevron.up.circle.fill")
+                                .font(.system(size: 50, weight: .bold))
+                                .foregroundColor(.orange)
+                                .background(Color.white.opacity(0.8))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
+                        }
+                        .offset(y: -180)
+                        
+                        // Стрелка вниз для очков (снизу от персонажа)
+                        Button(action: {
+                            withAnimation {
+                                selectedClothing = .glasses
+                                emotionValue = min(1.0, emotionValue + 0.1)
+                            }
+                        }) {
+                            Image(systemName: "chevron.down.circle.fill")
+                                .font(.system(size: 50, weight: .bold))
+                                .foregroundColor(.orange)
+                                .background(Color.white.opacity(0.8))
+                                .clipShape(Circle())
+                                .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
+                        }
+                        .offset(y: 180)
                     }
                 }
-                .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
-                .offset(x: isRolling && !isOutside ? rollDirection * UIScreen.main.bounds.width * 0.3 : 0)
-                .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
-                .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
-                .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
-                .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
-                .animation(.easeInOut(duration: 0.6), value: isRolling)
-                .animation(.easeInOut(duration: 0.6), value: rollDirection)
-                .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
                 
                 // Кнопки переключения комнат и действий
                 if isOutside {
@@ -411,36 +531,40 @@ struct GameView: View {
                 } else {
                     // В комнатах - показываем кнопки переключения и действий
                     HStack(spacing: 15) {
-                        // Кнопка "Назад" (влево)
-                        Button(action: {
-                            rollDirection = -1.0 // Перекатывание влево
-                            isRolling = true
-                            
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                                    if currentRoomIndex > 0 {
-                                        currentRoomIndex -= 1
-                                    } else {
-                                        currentRoomIndex = rooms.count - 1
+                        // Кнопка "Назад" (влево) - показывается только если можно перейти влево
+                        if canGoLeft {
+                            Button(action: {
+                                rollDirection = -1.0 // Перекатывание влево
+                                isRolling = true
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                                        if let leftIndex = getLeftRoomIndex() {
+                                            currentRoomIndex = leftIndex
+                                        }
                                     }
                                 }
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                    isRolling = false
+                                }
+                            }) {
+                                if let uiImage = UIImage(named: "left-button") {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 60, height: 60)
+                                } else {
+                                    Image(systemName: "chevron.left")
+                                        .font(.system(size: 30, weight: .bold))
+                                        .foregroundColor(.brown)
+                                        .frame(width: 60, height: 60)
+                                }
                             }
-                            
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                isRolling = false
-                            }
-                        }) {
-                            if let uiImage = UIImage(named: "left-button") {
-                                Image(uiImage: uiImage)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 60, height: 60)
-                            } else {
-                                Image(systemName: "chevron.left")
-                                    .font(.system(size: 30, weight: .bold))
-                                    .foregroundColor(.brown)
-                                    .frame(width: 60, height: 60)
-                            }
+                        } else {
+                            // Пустое место, если стрелка не показывается
+                            Color.clear
+                                .frame(width: 60, height: 60)
                         }
                         
                         // Кнопки действий в зависимости от комнаты
@@ -503,43 +627,75 @@ struct GameView: View {
                                     }
                                 )
                             }
+                            
+                            // В гардеробной - кнопка "Одевать"
+                            if currentRoomIndex == 3 { // wear-game
+                                ActionButton(
+                                    imageName: "wear-button",
+                                    action: {
+                                        // Показываем интерфейс выбора одежды
+                                        withAnimation {
+                                            showWearingInterface.toggle()
+                                            if !showWearingInterface {
+                                                // Если закрываем интерфейс, увеличиваем эмоции за выбранную одежду
+                                                if selectedClothing != nil {
+                                                    emotionValue = min(1.0, emotionValue + 0.1)
+                                                }
+                                            }
+                                        }
+                                        print("Одевать нажата")
+                                    }
+                                )
+                            }
                         }
                         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: currentRoomIndex)
                         
-                        // Кнопка "Вперед" (вправо)
-                        Button(action: {
-                            rollDirection = 1.0 // Перекатывание вправо
-                            isRolling = true
-                            
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                                    if currentRoomIndex < rooms.count - 1 {
-                                        currentRoomIndex += 1
-                                    } else {
-                                        currentRoomIndex = 0
+                        // Кнопка "Вперед" (вправо) - показывается только если можно перейти вправо
+                        if canGoRight {
+                            Button(action: {
+                                rollDirection = 1.0 // Перекатывание вправо
+                                isRolling = true
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                                        if let rightIndex = getRightRoomIndex() {
+                                            currentRoomIndex = rightIndex
+                                        }
                                     }
                                 }
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                    isRolling = false
+                                }
+                            }) {
+                                if let uiImage = UIImage(named: "right-button") {
+                                    Image(uiImage: uiImage)
+                                        .resizable()
+                                        .scaledToFit()
+                                        .frame(width: 60, height: 60)
+                                } else {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 30, weight: .bold))
+                                        .foregroundColor(.brown)
+                                        .frame(width: 60, height: 60)
+                                }
                             }
-                            
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                isRolling = false
-                            }
-                        }) {
-                            if let uiImage = UIImage(named: "right-button") {
-                                Image(uiImage: uiImage)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 60, height: 60)
-                            } else {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 30, weight: .bold))
-                                    .foregroundColor(.brown)
-                                    .frame(width: 60, height: 60)
-                            }
+                        } else {
+                            // Пустое место, если стрелка не показывается
+                            Color.clear
+                                .frame(width: 60, height: 60)
                         }
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 40)
+                }
+            }
+        }
+        .onChange(of: currentRoomIndex) { newIndex in
+            // Закрываем интерфейс выбора одежды при выходе из гардеробной
+            if newIndex != 3 && showWearingInterface {
+                withAnimation {
+                    showWearingInterface = false
                 }
             }
         }
