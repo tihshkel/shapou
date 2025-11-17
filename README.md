@@ -181,6 +181,7 @@ ShaPou/
 **Tihon Shkel**
 
 - GitHub: [@tihshkel](https://github.com/tihshkel)
+- GitHub: [@hulanalutarevic-create](https://github.com/ulanalutarevic-create)
 - GitHub denitihonovich@gmail.com
 - GitHub arsenlusev@gmail.com
 
