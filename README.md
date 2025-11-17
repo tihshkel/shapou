@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🐾 ShaPou
+# 🥚 ShaPou
 
 ### Виртуальный питомец для iOS
 
