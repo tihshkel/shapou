@@ -182,6 +182,7 @@ ShaPou/
 
 - GitHub: [@tihshkel](https://github.com/tihshkel)
 - GitHub denitihonovich@gmail.com
+- GitHub arsenlusev@gmail.com
 
 ## 🙏 Благодарности
 
