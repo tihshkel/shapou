@@ -74,6 +74,7 @@
 4. **Запустите приложение**
    - Выберите целевое устройство или симулятор
    - Нажмите `⌘R` или кнопку Run в Xcode
+     
 
 ### Сборка из командной строки
 
@@ -180,6 +181,7 @@ ShaPou/
 **Tihon Shkel**
 
 - GitHub: [@tihshkel](https://github.com/tihshkel)
+- GitHub denitihonovich@gmail.com
 
 ## 🙏 Благодарности
 
