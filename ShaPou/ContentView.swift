@@ -102,6 +102,62 @@ class MusicManager {
     }
 }
 
+// Менеджер для последовательного проигрывания реплик диалога
+class DialogueManager: NSObject, AVAudioPlayerDelegate {
+    static let shared = DialogueManager()
+    
+    private var audioPlayer: AVAudioPlayer?
+    private var queue: [String] = []
+    private var completion: (() -> Void)?
+    
+    func startDialogue(with fileNames: [String], completion: (() -> Void)? = nil) {
+        queue = fileNames
+        self.completion = completion
+        playNext()
+    }
+    
+    func stopDialogue() {
+        queue.removeAll()
+        audioPlayer?.stop()
+        audioPlayer = nil
+        completion = nil
+    }
+    
+    private func playNext() {
+        guard !queue.isEmpty else {
+            audioPlayer = nil
+            let finished = completion
+            completion = nil
+            finished?()
+            return
+        }
+        
+        let nextFile = queue.removeFirst()
+        
+        guard let url = Bundle.main.url(forResource: nextFile, withExtension: "mp3") ??
+                Bundle.main.url(forResource: "Sounds/\(nextFile)", withExtension: "mp3") else {
+            print("❌ Не найден файл диалога \(nextFile).mp3")
+            playNext()
+            return
+        }
+        
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer?.delegate = self
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.numberOfLoops = 0
+            audioPlayer?.play()
+        } catch {
+            print("❌ Ошибка проигрывания диалога \(nextFile): \(error.localizedDescription)")
+            playNext()
+        }
+    }
+    
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        playNext()
+    }
+}
+
 struct ContentView: View {
     @State private var showGame = false
     
@@ -123,9 +179,6 @@ struct MainMenuView: View {
             Image("main-game")
                 .resizable()
                 .scaledToFill()
-                .frame(width: UIScreen.main.bounds.width)
-                .frame(height: UIScreen.main.bounds.height)
-                .clipped()
                 .ignoresSafeArea()
             
             VStack(spacing: 30) {
@@ -237,10 +290,15 @@ struct GameView: View {
     @Binding var showGame: Bool
     @State private var currentRoomIndex = 0
     @State private var isOutside = false // Флаг для отслеживания, находимся ли на улице
+    @State private var isInGarden = false // Флаг для сцены огорода на улице
+    @State private var isWalkingToGarden = false // Флаг анимации перемещения к огороду
+    @State private var hasStartedGardenDialogue = false // Флаг, чтобы диалог запускался один раз за полив
     @State private var showFeedingGame = false // Флаг для показа мини-игры кормления
     @State private var showWashingGame = false // Флаг для показа мини-игры мытья
     @State private var showNotHungryDialog = false // Флаг для показа диалога "не голоден"
     @State private var showWashDialog = false // Флаг для показа диалога "я чистый"
+    @State private var showGardenDialog = false // Флаг для показа диалога после полива огорода
+    @State private var showBattleChoice = false // Флаг для показа окна выбора боя
     @State private var showWearingInterface = false // Флаг для показа интерфейса выбора одежды
     @State private var selectedClothing: ClothingType? = nil // Выбранная одежда
     
@@ -315,6 +373,21 @@ struct GameView: View {
         return nil
     }
     
+    // Смещение персонажа по оси X в зависимости от анимаций
+    private var characterOffsetX: CGFloat {
+        var offset: CGFloat = 0
+        
+        if isRolling && !isOutside {
+            offset += rollDirection * 120 // приблизительный сдвиг без привязки к UIScreen
+        }
+        
+        if isOutside && isInGarden && isWalkingToGarden {
+            offset += -60
+        }
+        
+        return offset
+    }
+    
     var body: some View {
         ZStack {
             if showFeedingGame {
@@ -342,6 +415,16 @@ struct GameView: View {
                 WashDialogView(showDialog: $showWashDialog)
                     .transition(.opacity)
             }
+            
+            if showGardenDialog {
+                GardenDialogView(showDialog: $showGardenDialog, showBattleChoice: $showBattleChoice)
+                    .transition(.opacity)
+            }
+            
+            if showBattleChoice {
+                BattleChoiceView(showBattleChoice: $showBattleChoice)
+                    .transition(.scale.combined(with: .opacity))
+            }
         }
     }
     
@@ -349,14 +432,12 @@ struct GameView: View {
         ZStack {
             // Фоновое изображение - улица или текущая комната
             if isOutside {
-                // Фон улицы
-                if let uiImage = UIImage(named: "outside-game") {
+                // Фон улицы или сцены огорода
+                let outsideImageName = isInGarden ? "out-game" : "outside-game"
+                if let uiImage = UIImage(named: outsideImageName) {
                     Image(uiImage: uiImage)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: UIScreen.main.bounds.width)
-                        .frame(height: UIScreen.main.bounds.height)
-                        .clipped()
                         .ignoresSafeArea()
                 } else {
                     Color.green.opacity(0.3)
@@ -368,9 +449,6 @@ struct GameView: View {
                     Image(uiImage: uiImage)
                         .resizable()
                         .scaledToFill()
-                        .frame(width: UIScreen.main.bounds.width)
-                        .frame(height: UIScreen.main.bounds.height)
-                        .clipped()
                         .ignoresSafeArea()
                 } else {
                     Color.blue.opacity(0.3)
@@ -405,119 +483,161 @@ struct GameView: View {
                 
                 Spacer()
                 
-                // Персонаж (меняется в зависимости от параметров) - показывается везде
-                ZStack {
-                    Group {
-                        let minValue = min(emotionValue, hungerValue, washingValue)
-                        let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
-                        
-                        if hasZero {
-                            // Злой персонаж - когда хотя бы один параметр на нуле
-                            Image("angry-shapou")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 300, height: 300)
-                                .padding(.bottom, 20)
-                                .transition(.scale(scale: 0.8).combined(with: .opacity))
-                        } else if minValue <= 0.5 {
-                            // Грустный персонаж - когда параметры ухудшились
-                            Image("sad-shapou")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 300, height: 300)
-                                .padding(.bottom, 20)
-                                .transition(.scale(scale: 0.8).combined(with: .opacity))
-                        } else {
-                            // Нормальный персонаж - когда все параметры в норме
-                            Image("normal-shapou")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 300, height: 300)
-                                .padding(.bottom, 20)
-                                .transition(.scale(scale: 0.8).combined(with: .opacity))
-                        }
-                    }
-                    .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
-                    .offset(x: isRolling && !isOutside ? rollDirection * UIScreen.main.bounds.width * 0.3 : 0)
-                    .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
-                    .animation(.easeInOut(duration: 0.6), value: isRolling)
-                    .animation(.easeInOut(duration: 0.6), value: rollDirection)
-                    .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
-                    
-                    // Одежда на персонаже (показывается когда выбрана, даже если интерфейс закрыт)
-                    if let clothing = selectedClothing {
-                        // Шляпа сверху
-                        if clothing == .hat {
-                            Image("hat-wear")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 200, height: 200)
-                                .offset(y: -120)
-                                .transition(.scale.combined(with: .opacity))
-                        }
-                        
-                        // Очки
-                        if clothing == .glasses {
-                            Image("glases-wear")
-                                .resizable()
-                                .scaledToFit()
-                                .frame(width: 180, height: 180)
-                                .offset(y: -50)
-                                .transition(.scale.combined(with: .opacity))
-                        }
-                    }
-                    
-                    // Стрелки для выбора одежды (только в гардеробной и когда показывается интерфейс)
-                    if currentRoomIndex == 3 && showWearingInterface {
-                        // Стрелка вверх для шляпы (сверху от персонажа)
-                        Button(action: {
-                            withAnimation {
-                                selectedClothing = .hat
-                                emotionValue = min(1.0, emotionValue + 0.1)
+                // Персонаж (меняется в зависимости от параметров) - НЕ показывается в момент полива огорода
+                if !(isOutside && isInGarden) {
+                    ZStack {
+                        Group {
+                            let minValue = min(emotionValue, hungerValue, washingValue)
+                            let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
+                            
+                            if hasZero {
+                                // Злой персонаж - когда хотя бы один параметр на нуле
+                                Image("angry-shapou")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 300, height: 300)
+                                    .padding(.bottom, 20)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                            } else if minValue <= 0.5 {
+                                // Грустный персонаж - когда параметры ухудшились
+                                Image("sad-shapou")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 300, height: 300)
+                                    .padding(.bottom, 20)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                            } else {
+                                // Нормальный персонаж - когда все параметры в норме
+                                Image("normal-shapou")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 300, height: 300)
+                                    .padding(.bottom, 20)
+                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
                             }
-                        }) {
-                            Image(systemName: "chevron.up.circle.fill")
-                                .font(.system(size: 50, weight: .bold))
-                                .foregroundColor(.orange)
-                                .background(Color.white.opacity(0.8))
-                                .clipShape(Circle())
-                                .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
                         }
-                        .offset(y: -180)
+                        .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
+                        .offset(x: characterOffsetX)
+                        .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
+                        .animation(.easeInOut(duration: 0.6), value: isRolling)
+                        .animation(.easeInOut(duration: 0.6), value: rollDirection)
+                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
                         
-                        // Стрелка вниз для очков (снизу от персонажа)
-                        Button(action: {
-                            withAnimation {
-                                selectedClothing = .glasses
-                                emotionValue = min(1.0, emotionValue + 0.1)
+                        // Одежда на персонаже (показывается когда выбрана, даже если интерфейс закрыт)
+                        if let clothing = selectedClothing {
+                            // Шляпа сверху
+                            if clothing == .hat {
+                                Image("hat-wear")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 200, height: 200)
+                                    .offset(y: -120)
+                                    .transition(.scale.combined(with: .opacity))
                             }
-                        }) {
-                            Image(systemName: "chevron.down.circle.fill")
-                                .font(.system(size: 50, weight: .bold))
-                                .foregroundColor(.orange)
-                                .background(Color.white.opacity(0.8))
-                                .clipShape(Circle())
-                                .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
+                            
+                            // Очки
+                            if clothing == .glasses {
+                                Image("glases-wear")
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 180, height: 180)
+                                    .offset(y: -50)
+                                    .transition(.scale.combined(with: .opacity))
+                            }
                         }
-                        .offset(y: 180)
+                        
+                        // Стрелки для выбора одежды (только в гардеробной и когда показывается интерфейс)
+                        if currentRoomIndex == 3 && showWearingInterface {
+                            // Стрелка вверх для шляпы (сверху от персонажа)
+                            Button(action: {
+                                withAnimation {
+                                    selectedClothing = .hat
+                                    emotionValue = min(1.0, emotionValue + 0.1)
+                                }
+                            }) {
+                                Image(systemName: "chevron.up.circle.fill")
+                                    .font(.system(size: 50, weight: .bold))
+                                    .foregroundColor(.orange)
+                                    .background(Color.white.opacity(0.8))
+                                    .clipShape(Circle())
+                                    .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
+                            }
+                            .offset(y: -180)
+                            
+                            // Стрелка вниз для очков (снизу от персонажа)
+                            Button(action: {
+                                withAnimation {
+                                    selectedClothing = .glasses
+                                    emotionValue = min(1.0, emotionValue + 0.1)
+                                }
+                            }) {
+                                Image(systemName: "chevron.down.circle.fill")
+                                    .font(.system(size: 50, weight: .bold))
+                                    .foregroundColor(.orange)
+                                    .background(Color.white.opacity(0.8))
+                                    .clipShape(Circle())
+                                    .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
+                            }
+                            .offset(y: 180)
+                        }
                     }
                 }
                 
                 // Кнопки переключения комнат и действий
                 if isOutside {
-                    // На улице - показываем только кнопку "Назад"
+                    // На улице - кнопка "Полить" до начала полива и только "Назад" во время полива
                     HStack {
+                        Spacer()
+                        
+                        // Кнопка "Полить" показывается только до начала полива
+                        if !isInGarden {
+                            ActionButton(
+                                imageName: "ogorod-button",
+                                action: {
+                                    // Переход к сцене огорода с анимацией перемещения
+                                    withAnimation(.easeInOut(duration: 0.6)) {
+                                        isInGarden = true
+                                        isWalkingToGarden = true
+                                        hasStartedGardenDialogue = false
+                                        emotionValue = min(1.0, emotionValue + 0.1)
+                                    }
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                        withAnimation(.easeInOut(duration: 0.4)) {
+                                            isWalkingToGarden = false
+                                        }
+                                    }
+                                    
+                                    // Запускаем диалог через 5 секунд после начала полива огорода
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) {
+                                        if isOutside && isInGarden && !hasStartedGardenDialogue {
+                                            withAnimation {
+                                                showGardenDialog = true
+                                                hasStartedGardenDialogue = true
+                                            }
+                                        }
+                                    }
+                                    
+                                    print("Огород нажата")
+                                }
+                            )
+                        }
+                        
                         Spacer()
                         
                         ActionButton(
                             imageName: "back-button",
                             action: {
-                                // Возврат в главную комнату
+                                // Возврат в главную комнату и выход из сцены огорода
                                 withAnimation {
                                     isOutside = false
+                                    isInGarden = false
+                                    isWalkingToGarden = false
+                                    hasStartedGardenDialogue = false
+                                    showGardenDialog = false
                                     currentRoomIndex = 0
                                 }
                                 print("Назад нажата")
@@ -802,7 +922,6 @@ struct FeedingGameView: View {
     @State private var isMovingLeft = false
     @State private var isMovingRight = false
     
-    private let screenWidth = UIScreen.main.bounds.width
     private let playerSize: CGFloat = 100 // Увеличено с 80 до 100
     private let moveSpeed: CGFloat = 0.02
     
@@ -856,7 +975,7 @@ struct FeedingGameView: View {
                         }
                         .frame(height: 20)
                     }
-                    .frame(maxWidth: UIScreen.main.bounds.width * 0.8)
+                    .frame(maxWidth: 600)
                     
                     Spacer()
                 }
@@ -1179,7 +1298,7 @@ struct WashingGameView: View {
                         }
                         .frame(height: 20)
                     }
-                    .frame(maxWidth: UIScreen.main.bounds.width * 0.8)
+                    .frame(maxWidth: 600)
                     
                     Spacer()
                 }
@@ -1412,6 +1531,166 @@ struct WashDialogView: View {
             withAnimation {
                 showDialog = false
             }
+        }
+    }
+}
+
+// Диалог после полива огорода
+struct GardenDialogView: View {
+    @Binding var showDialog: Bool
+    @Binding var showBattleChoice: Bool
+    
+    var body: some View {
+        ZStack {
+            // Базовый фон диалога
+            if let uiImage = UIImage(named: "dialog-background") {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: UIScreen.main.bounds.width)
+                    .frame(height: UIScreen.main.bounds.height)
+                    .clipped()
+                    .ignoresSafeArea()
+            } else {
+                Color.black
+                    .ignoresSafeArea()
+            }
+            
+            // Затемняющий слой поверх фона
+            Color.black.opacity(0.55)
+                .ignoresSafeArea()
+            
+            // Крупные персонажи слева и справа
+            HStack {
+                // Шапоу слева
+                if let normalImage = UIImage(named: "normal-shapou") {
+                    Image(uiImage: normalImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 220, height: 220)
+                        .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 6)
+                        .padding(.leading, 20)
+                }
+                
+                Spacer()
+                
+                // Злой герой справа
+                if let badImage = UIImage(named: "bad-hero") {
+                    Image(uiImage: badImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 240, height: 240)
+                        .shadow(color: .black.opacity(0.6), radius: 10, x: 0, y: 6)
+                        .padding(.trailing, 20)
+                }
+            }
+        }
+        .onAppear {
+            // Останавливаем основную музыку и запускаем последовательный диалог
+            MusicManager.shared.stopMusic()
+            DialogueManager.shared.startDialogue(with: [
+                "bad-dialog1",
+                "shapo-dialog1",
+                "bad-dialog2",
+                "shapou-dialog2"
+            ]) {
+                // После окончания диалога автоматически показываем окно выбора боя
+                DispatchQueue.main.async {
+                    withAnimation {
+                        showDialog = false
+                        showBattleChoice = true
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            DialogueManager.shared.stopDialogue()
+        }
+        .onTapGesture {
+            withAnimation {
+                showDialog = false
+                showBattleChoice = true
+            }
+        }
+    }
+}
+
+struct BattleChoiceView: View {
+    @Binding var showBattleChoice: Bool
+    
+    var body: some View {
+        ZStack {
+            // Фон окна "В БОЙ?!"
+            if let uiImage = UIImage(named: "dialog-background2") {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: UIScreen.main.bounds.width)
+                    .frame(height: UIScreen.main.bounds.height)
+                    .clipped()
+                    .ignoresSafeArea()
+            } else {
+                Color.black.opacity(0.7)
+                    .ignoresSafeArea()
+            }
+            
+            VStack(spacing: 30) {
+                Spacer()
+                
+                VStack(spacing: 24) {
+                    // Кнопка "Принять вызов!"
+                    Button(action: {
+                        withAnimation {
+                            showBattleChoice = false
+                        }
+                        print("Принять вызов нажата")
+                    }) {
+                        if let acceptImage = UIImage(named: "accept-button") {
+                            Image(uiImage: acceptImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 90)
+                        } else {
+                            Text("Принять вызов!")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.brown)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 20)
+                                .background(Color.orange)
+                                .cornerRadius(22)
+                        }
+                    }
+                    
+                    // Кнопка "Убежать"
+                    Button(action: {
+                        withAnimation {
+                            showBattleChoice = false
+                        }
+                        print("Убежать нажата")
+                    }) {
+                        if let rejectImage = UIImage(named: "reject-button") {
+                            Image(uiImage: rejectImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 90)
+                        } else {
+                            Text("Убежать")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.brown)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 20)
+                                .background(Color.yellow)
+                                .cornerRadius(22)
+                        }
+                    }
+                }
+                
+                Spacer()
+            }
+            .padding(.horizontal, 24)
+        }
+        .onTapGesture {
+            // Игнорируем тап по фону, чтобы игрок осознанно выбрал кнопку
         }
     }
 }
