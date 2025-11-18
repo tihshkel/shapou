@@ -184,6 +184,7 @@ ShaPou/
 - GitHub: [@hulanalutarevic-create](https://github.com/ulanalutarevic-create)
 - GitHub denitihonovich@gmail.com
 - GitHub arsenlusev@gmail.com
+- GitHub: [@diffkaa](https://github.com/diffkaa)
 
 ## 🙏 Благодарности
 
