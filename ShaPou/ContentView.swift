@@ -8,15 +8,30 @@
 import SwiftUI
 import UIKit
 import AVFoundation
+import Combine
 
 // Менеджер для воспроизведения музыки (синглтон)
-class MusicManager {
+class MusicManager: ObservableObject {
     static let shared = MusicManager()
     
     private var audioPlayer: AVAudioPlayer?
     private var isAudioSessionConfigured = false
     
+    var isMusicEnabled: Bool {
+        didSet {
+            objectWillChange.send()
+            UserDefaults.standard.set(isMusicEnabled, forKey: "isMusicEnabled")
+            if isMusicEnabled {
+                playMusic(fileName: "music-game", fileExtension: "mp3")
+            } else {
+                stopMusic()
+            }
+        }
+    }
+    
     private init() {
+        // Загружаем настройку музыки из UserDefaults (по умолчанию включена)
+        self.isMusicEnabled = UserDefaults.standard.object(forKey: "isMusicEnabled") as? Bool ?? true
         configureAudioSession()
     }
     
@@ -33,6 +48,12 @@ class MusicManager {
     }
     
     func playMusic(fileName: String, fileExtension: String = "mp3") {
+        // Проверяем, включена ли музыка в настройках
+        guard isMusicEnabled else {
+            print("Музыка отключена в настройках")
+            return
+        }
+        
         // Если музыка уже играет, не запускаем снова
         if audioPlayer != nil && audioPlayer?.isPlaying == true {
             print("Музыка уже играет")
@@ -123,6 +144,45 @@ class DialogueManager: NSObject, AVAudioPlayerDelegate {
         completion = nil
     }
     
+    func playSingleDialogue(fileName: String, fileExtension: String = "mp3", completion: (() -> Void)? = nil) {
+        self.completion = completion
+        
+        var url: URL?
+        
+        // Попытка 1: Стандартный путь через Bundle
+        url = Bundle.main.url(forResource: fileName, withExtension: fileExtension)
+        
+        // Попытка 2: Путь с учетом папки Sounds
+        if url == nil {
+            url = Bundle.main.url(forResource: "Sounds/\(fileName)", withExtension: fileExtension)
+        }
+        
+        // Попытка 3: Прямой путь к файлу
+        if url == nil {
+            let filePath = Bundle.main.path(forResource: fileName, ofType: fileExtension)
+            if let filePath = filePath {
+                url = URL(fileURLWithPath: filePath)
+            }
+        }
+        
+        guard let audioURL = url else {
+            print("❌ Не найден файл диалога \(fileName).\(fileExtension)")
+            completion?()
+            return
+        }
+        
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: audioURL)
+            audioPlayer?.delegate = self
+            audioPlayer?.prepareToPlay()
+            audioPlayer?.numberOfLoops = 0
+            audioPlayer?.play()
+        } catch {
+            print("❌ Ошибка проигрывания диалога \(fileName): \(error.localizedDescription)")
+            completion?()
+        }
+    }
+    
     private func playNext() {
         guard !queue.isEmpty else {
             audioPlayer = nil
@@ -134,15 +194,35 @@ class DialogueManager: NSObject, AVAudioPlayerDelegate {
         
         let nextFile = queue.removeFirst()
         
-        guard let url = Bundle.main.url(forResource: nextFile, withExtension: "mp3") ??
-                Bundle.main.url(forResource: "Sounds/\(nextFile)", withExtension: "mp3") else {
-            print("❌ Не найден файл диалога \(nextFile).mp3")
+        // Пробуем разные расширения и пути
+        var url: URL?
+        
+        // Попытка 1: mp3 в корне
+        url = Bundle.main.url(forResource: nextFile, withExtension: "mp3")
+        
+        // Попытка 2: mp3 в папке Sounds
+        if url == nil {
+            url = Bundle.main.url(forResource: "Sounds/\(nextFile)", withExtension: "mp3")
+        }
+        
+        // Попытка 3: wav в корне
+        if url == nil {
+            url = Bundle.main.url(forResource: nextFile, withExtension: "wav")
+        }
+        
+        // Попытка 4: wav в папке Sounds
+        if url == nil {
+            url = Bundle.main.url(forResource: "Sounds/\(nextFile)", withExtension: "wav")
+        }
+        
+        guard let audioURL = url else {
+            print("❌ Не найден файл диалога \(nextFile)")
             playNext()
             return
         }
         
         do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
+            audioPlayer = try AVAudioPlayer(contentsOf: audioURL)
             audioPlayer?.delegate = self
             audioPlayer?.prepareToPlay()
             audioPlayer?.numberOfLoops = 0
@@ -154,7 +234,15 @@ class DialogueManager: NSObject, AVAudioPlayerDelegate {
     }
     
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        playNext()
+        // Если есть очередь - играем следующий, иначе вызываем completion
+        if !queue.isEmpty {
+            playNext()
+        } else {
+            // Одиночный диалог завершен
+            let finished = completion
+            completion = nil
+            finished?()
+        }
     }
 }
 
@@ -172,6 +260,7 @@ struct ContentView: View {
 
 struct MainMenuView: View {
     @Binding var showGame: Bool
+    @State private var showSettings = false
     
     var body: some View {
         ZStack {
@@ -201,8 +290,10 @@ struct MainMenuView: View {
                         title: "Настройки",
                         icon: "gearshape.fill",
                         action: {
-                            // Действие для кнопки "Настройки"
-                            print("Настройки нажата")
+                            // Показываем экран настроек
+                            withAnimation {
+                                showSettings = true
+                            }
                         }
                     )
                     
@@ -218,6 +309,9 @@ struct MainMenuView: View {
                 .padding(.horizontal, 40)
                 .padding(.bottom, 60)
             }
+        }
+        .sheet(isPresented: $showSettings) {
+            SettingsView()
         }
         .onAppear {
             MusicManager.shared.playMusic(fileName: "music-game", fileExtension: "mp3")
@@ -280,12 +374,6 @@ struct MenuButton: View {
     }
 }
 
-// Типы одежды
-enum ClothingType {
-    case hat
-    case glasses
-}
-
 struct GameView: View {
     @Binding var showGame: Bool
     @State private var currentRoomIndex = 0
@@ -299,8 +387,9 @@ struct GameView: View {
     @State private var showWashDialog = false // Флаг для показа диалога "я чистый"
     @State private var showGardenDialog = false // Флаг для показа диалога после полива огорода
     @State private var showBattleChoice = false // Флаг для показа окна выбора боя
-    @State private var showWearingInterface = false // Флаг для показа интерфейса выбора одежды
-    @State private var selectedClothing: ClothingType? = nil // Выбранная одежда
+    @State private var showBattle = false // Флаг для показа боевой сцены
+    @State private var isChoosingSkin = false // Флаг для режима выбора скина в гардеробной
+    @State private var currentSkinIndex = 0 // Индекс текущего скина: 0 = normal, 1 = yandex, 2 = newyear
     
     // Значения прогресс-баров (0.0 - 1.0) - начинаем с максимума
     @State private var emotionValue: Double = 1.0
@@ -390,7 +479,12 @@ struct GameView: View {
     
     var body: some View {
         ZStack {
-            if showFeedingGame {
+            if showBattle {
+                BattleView(
+                    showBattle: $showBattle,
+                    emotionValue: $emotionValue
+                )
+            } else if showFeedingGame {
                 FeedingGameView(
                     showFeedingGame: $showFeedingGame,
                     hungerValue: $hungerValue,
@@ -417,13 +511,26 @@ struct GameView: View {
             }
             
             if showGardenDialog {
-                GardenDialogView(showDialog: $showGardenDialog, showBattleChoice: $showBattleChoice)
-                    .transition(.opacity)
+                GardenDialogView(
+                    showDialog: $showGardenDialog,
+                    showBattleChoice: $showBattleChoice,
+                    showBattle: $showBattle,
+                    isOutside: $isOutside,
+                    isInGarden: $isInGarden,
+                    currentRoomIndex: $currentRoomIndex
+                )
+                .transition(.opacity)
             }
             
             if showBattleChoice {
-                BattleChoiceView(showBattleChoice: $showBattleChoice)
-                    .transition(.scale.combined(with: .opacity))
+                BattleChoiceView(
+                    showBattleChoice: $showBattleChoice,
+                    showBattle: $showBattle,
+                    isOutside: $isOutside,
+                    isInGarden: $isInGarden,
+                    currentRoomIndex: $currentRoomIndex
+                )
+                .transition(.scale.combined(with: .opacity))
             }
         }
     }
@@ -483,106 +590,69 @@ struct GameView: View {
                 
                 Spacer()
                 
-                // Персонаж (меняется в зависимости от параметров) - НЕ показывается в момент полива огорода
+                // Персонаж (меняется в зависимости от параметров и скина) - НЕ показывается в момент полива огорода
                 if !(isOutside && isInGarden) {
-                    ZStack {
-                        Group {
-                            let minValue = min(emotionValue, hungerValue, washingValue)
-                            let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
-                            
-                            if hasZero {
-                                // Злой персонаж - когда хотя бы один параметр на нуле
-                                Image("angry-shapou")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 300, height: 300)
-                                    .padding(.bottom, 20)
-                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
-                            } else if minValue <= 0.5 {
-                                // Грустный персонаж - когда параметры ухудшились
-                                Image("sad-shapou")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 300, height: 300)
-                                    .padding(.bottom, 20)
-                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                    let minValue = min(emotionValue, hungerValue, washingValue)
+                    let hasZero = emotionValue == 0 || hungerValue == 0 || washingValue == 0
+                    
+                    // Определяем имя изображения персонажа
+                    let characterImageName: String = {
+                        // В гардеробной в режиме выбора скина показываем выбранный скин независимо от параметров
+                        if currentRoomIndex == 3 && isChoosingSkin {
+                            switch currentSkinIndex {
+                            case 1:
+                                return "yandex-shapou"
+                            case 2:
+                                return "newyear-shapou"
+                            default:
+                                return "normal-shapou"
+                            }
+                        }
+                        
+                        // В остальных случаях учитываем параметры и выбранный скин
+                        if hasZero {
+                            // Злой персонаж - когда хотя бы один параметр на нуле
+                            return "angry-shapou"
+                        } else if minValue <= 0.5 {
+                            // Грустный персонаж - когда параметры ухудшились
+                            return "sad-shapou"
+                        } else {
+                            // Нормальный персонаж или выбранный скин
+                            if currentSkinIndex > 0 {
+                                // Используем выбранный скин (применяется везде)
+                                switch currentSkinIndex {
+                                case 1:
+                                    return "yandex-shapou"
+                                case 2:
+                                    return "newyear-shapou"
+                                default:
+                                    return "normal-shapou"
+                                }
                             } else {
-                                // Нормальный персонаж - когда все параметры в норме
-                                Image("normal-shapou")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 300, height: 300)
-                                    .padding(.bottom, 20)
-                                    .transition(.scale(scale: 0.8).combined(with: .opacity))
+                                // Обычный персонаж
+                                return "normal-shapou"
                             }
                         }
-                        .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
-                        .offset(x: characterOffsetX)
-                        .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
-                        .animation(.easeInOut(duration: 0.6), value: isRolling)
-                        .animation(.easeInOut(duration: 0.6), value: rollDirection)
-                        .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
-                        
-                        // Одежда на персонаже (показывается когда выбрана, даже если интерфейс закрыт)
-                        if let clothing = selectedClothing {
-                            // Шляпа сверху
-                            if clothing == .hat {
-                                Image("hat-wear")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 200, height: 200)
-                                    .offset(y: -120)
-                                    .transition(.scale.combined(with: .opacity))
-                            }
-                            
-                            // Очки
-                            if clothing == .glasses {
-                                Image("glases-wear")
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 180, height: 180)
-                                    .offset(y: -50)
-                                    .transition(.scale.combined(with: .opacity))
-                            }
-                        }
-                        
-                        // Стрелки для выбора одежды (только в гардеробной и когда показывается интерфейс)
-                        if currentRoomIndex == 3 && showWearingInterface {
-                            // Стрелка вверх для шляпы (сверху от персонажа)
-                            Button(action: {
-                                withAnimation {
-                                    selectedClothing = .hat
-                                    emotionValue = min(1.0, emotionValue + 0.1)
-                                }
-                            }) {
-                                Image(systemName: "chevron.up.circle.fill")
-                                    .font(.system(size: 50, weight: .bold))
-                                    .foregroundColor(.orange)
-                                    .background(Color.white.opacity(0.8))
-                                    .clipShape(Circle())
-                                    .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
-                            }
-                            .offset(y: -180)
-                            
-                            // Стрелка вниз для очков (снизу от персонажа)
-                            Button(action: {
-                                withAnimation {
-                                    selectedClothing = .glasses
-                                    emotionValue = min(1.0, emotionValue + 0.1)
-                                }
-                            }) {
-                                Image(systemName: "chevron.down.circle.fill")
-                                    .font(.system(size: 50, weight: .bold))
-                                    .foregroundColor(.orange)
-                                    .background(Color.white.opacity(0.8))
-                                    .clipShape(Circle())
-                                    .shadow(color: .black.opacity(0.3), radius: 5, x: 0, y: 2)
-                            }
-                            .offset(y: 180)
-                        }
+                    }()
+                    
+                    ZStack {
+                        Image(characterImageName)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 300, height: 300)
+                            .padding(.bottom, 20)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
+                            .rotationEffect(.degrees(isRolling && !isOutside ? rollDirection * 360 : 0))
+                            .offset(x: characterOffsetX)
+                            .scaleEffect(isRolling && !isOutside ? 0.8 : 1.0)
+                            .animation(.spring(response: 0.5, dampingFraction: 0.7), value: emotionValue)
+                            .animation(.spring(response: 0.5, dampingFraction: 0.7), value: hungerValue)
+                            .animation(.spring(response: 0.5, dampingFraction: 0.7), value: washingValue)
+                            .animation(.easeInOut(duration: 0.6), value: isRolling)
+                            .animation(.easeInOut(duration: 0.6), value: rollDirection)
+                            .animation(.spring(response: 0.5, dampingFraction: 0.7), value: isOutside)
+                            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: currentSkinIndex)
+                            .id("character-\(characterImageName)-\(currentSkinIndex)") // Принудительное обновление при изменении скина
                     }
                 }
                 
@@ -650,175 +720,259 @@ struct GameView: View {
                     .padding(.bottom, 40)
                 } else {
                     // В комнатах - показываем кнопки переключения и действий
-                    HStack(spacing: 15) {
-                        // Кнопка "Назад" (влево) - показывается только если можно перейти влево
-                        if canGoLeft {
-                            Button(action: {
-                                rollDirection = -1.0 // Перекатывание влево
-                                isRolling = true
+                    if currentRoomIndex == 3 && isChoosingSkin {
+                        // В гардеробной в режиме выбора скина - показываем стрелки для переключения скинов и кнопку выхода
+                        VStack(spacing: 20) {
+                            // Стрелки для переключения скинов
+                            HStack(spacing: 30) {
+                                Spacer()
                                 
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                                        if let leftIndex = getLeftRoomIndex() {
-                                            currentRoomIndex = leftIndex
+                                // Кнопка влево - предыдущий скин
+                                Button(action: {
+                                    DispatchQueue.main.async {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                            if currentSkinIndex > 0 {
+                                                currentSkinIndex -= 1
+                                            } else {
+                                                currentSkinIndex = 2 // Переход к последнему скину
+                                            }
                                         }
+                                        print("Скин влево - индекс: \(currentSkinIndex)")
+                                    }
+                                }) {
+                                    if let uiImage = UIImage(named: "left-button") {
+                                        Image(uiImage: uiImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 80, height: 80)
+                                    } else {
+                                        Image(systemName: "chevron.left")
+                                            .font(.system(size: 40, weight: .bold))
+                                            .foregroundColor(.brown)
+                                            .frame(width: 80, height: 80)
                                     }
                                 }
                                 
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                    isRolling = false
+                                Spacer()
+                                
+                                // Кнопка вправо - следующий скин
+                                Button(action: {
+                                    DispatchQueue.main.async {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                            if currentSkinIndex < 2 {
+                                                currentSkinIndex += 1
+                                            } else {
+                                                currentSkinIndex = 0 // Переход к первому скину
+                                            }
+                                        }
+                                        print("Скин вправо - индекс: \(currentSkinIndex)")
+                                    }
+                                }) {
+                                    if let uiImage = UIImage(named: "right-button") {
+                                        Image(uiImage: uiImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 80, height: 80)
+                                    } else {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 40, weight: .bold))
+                                            .foregroundColor(.brown)
+                                            .frame(width: 80, height: 80)
+                                    }
                                 }
-                            }) {
-                                if let uiImage = UIImage(named: "left-button") {
-                                    Image(uiImage: uiImage)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 60, height: 60)
-                                } else {
-                                    Image(systemName: "chevron.left")
-                                        .font(.system(size: 30, weight: .bold))
-                                        .foregroundColor(.brown)
-                                        .frame(width: 60, height: 60)
-                                }
+                                
+                                Spacer()
                             }
-                        } else {
-                            // Пустое место, если стрелка не показывается
-                            Color.clear
-                                .frame(width: 60, height: 60)
+                            
+                            // Кнопка "Назад" для выхода из режима выбора скина
+                            HStack {
+                                Spacer()
+                                
+                                ActionButton(
+                                    imageName: "back-button",
+                                    action: {
+                                        withAnimation {
+                                            isChoosingSkin = false
+                                        }
+                                        print("Выход из режима выбора скина")
+                                    }
+                                )
+                                
+                                Spacer()
+                            }
                         }
-                        
-                        // Кнопки действий в зависимости от комнаты
-                        Group {
-                            // В ванной комнате - кнопка "Мыть"
-                            if currentRoomIndex == 2 { // bathroom-game
-                                ActionButton(
-                                    imageName: "wash-button",
-                                    action: {
-                                        // Проверяем уровень чистоты
-                                        if washingValue > 0.5 {
-                                            // Если чистота больше половины - показываем диалог
-                                            withAnimation {
-                                                showWashDialog = true
-                                            }
-                                        } else {
-                                            // Если чистота меньше половины - открываем мини-игру
-                                            withAnimation {
-                                                showWashingGame = true
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 40)
+                    } else {
+                        // Обычные кнопки навигации и действий
+                        HStack(spacing: 15) {
+                            // Кнопка "Назад" (влево) - показывается только если можно перейти влево
+                            if canGoLeft {
+                                Button(action: {
+                                    // Сбрасываем режим выбора скина при выходе из гардеробной
+                                    if currentRoomIndex == 3 {
+                                        isChoosingSkin = false
+                                    }
+                                    
+                                    rollDirection = -1.0 // Перекатывание влево
+                                    isRolling = true
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                                            if let leftIndex = getLeftRoomIndex() {
+                                                currentRoomIndex = leftIndex
                                             }
                                         }
-                                        print("Мыть нажата")
                                     }
-                                )
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                        isRolling = false
+                                    }
+                                }) {
+                                    if let uiImage = UIImage(named: "left-button") {
+                                        Image(uiImage: uiImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 60, height: 60)
+                                    } else {
+                                        Image(systemName: "chevron.left")
+                                            .font(.system(size: 30, weight: .bold))
+                                            .foregroundColor(.brown)
+                                            .frame(width: 60, height: 60)
+                                    }
+                                }
+                            } else {
+                                // Пустое место, если стрелка не показывается
+                                Color.clear
+                                    .frame(width: 60, height: 60)
                             }
                             
-                            // В главной комнате - кнопка "На улицу"
-                            if currentRoomIndex == 0 && !isOutside { // background-game
-                                ActionButton(
-                                    imageName: "walk-button",
-                                    action: {
-                                        // Переход на улицу
-                                        withAnimation {
-                                            isOutside = true
-                                            emotionValue = min(1.0, emotionValue + 0.2)
-                                        }
-                                        print("На улицу нажата")
-                                    }
-                                )
-                            }
-                            
-                            // На кухне - кнопка "Кормить"
-                            if currentRoomIndex == 1 { // kitchen-game
-                                ActionButton(
-                                    imageName: "kitchen-button",
-                                    action: {
-                                        // Проверяем уровень голода
-                                        if hungerValue > 0.5 {
-                                            // Если голод больше половины - показываем диалог
-                                            withAnimation {
-                                                showNotHungryDialog = true
-                                            }
-                                        } else {
-                                            // Если голод меньше половины - открываем мини-игру
-                                            withAnimation {
-                                                showFeedingGame = true
-                                            }
-                                        }
-                                        print("Кормить нажата")
-                                    }
-                                )
-                            }
-                            
-                            // В гардеробной - кнопка "Одевать"
-                            if currentRoomIndex == 3 { // wear-game
-                                ActionButton(
-                                    imageName: "wear-button",
-                                    action: {
-                                        // Показываем интерфейс выбора одежды
-                                        withAnimation {
-                                            showWearingInterface.toggle()
-                                            if !showWearingInterface {
-                                                // Если закрываем интерфейс, увеличиваем эмоции за выбранную одежду
-                                                if selectedClothing != nil {
-                                                    emotionValue = min(1.0, emotionValue + 0.1)
+                            // Кнопки действий в зависимости от комнаты
+                            Group {
+                                // В ванной комнате - кнопка "Мыть"
+                                if currentRoomIndex == 2 { // bathroom-game
+                                    ActionButton(
+                                        imageName: "wash-button",
+                                        action: {
+                                            // Проверяем уровень чистоты
+                                            if washingValue > 0.5 {
+                                                // Если чистота больше половины - показываем диалог
+                                                withAnimation {
+                                                    showWashDialog = true
+                                                }
+                                            } else {
+                                                // Если чистота меньше половины - открываем мини-игру
+                                                withAnimation {
+                                                    showWashingGame = true
                                                 }
                                             }
+                                            print("Мыть нажата")
                                         }
-                                        print("Одевать нажата")
-                                    }
-                                )
-                            }
-                        }
-                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: currentRoomIndex)
-                        
-                        // Кнопка "Вперед" (вправо) - показывается только если можно перейти вправо
-                        if canGoRight {
-                            Button(action: {
-                                rollDirection = 1.0 // Перекатывание вправо
-                                isRolling = true
-                                
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
-                                        if let rightIndex = getRightRoomIndex() {
-                                            currentRoomIndex = rightIndex
-                                        }
-                                    }
+                                    )
                                 }
                                 
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-                                    isRolling = false
+                                // В главной комнате - кнопка "На улицу"
+                                if currentRoomIndex == 0 && !isOutside { // background-game
+                                    ActionButton(
+                                        imageName: "walk-button",
+                                        action: {
+                                            // Переход на улицу
+                                            withAnimation {
+                                                isOutside = true
+                                                emotionValue = min(1.0, emotionValue + 0.2)
+                                            }
+                                            print("На улицу нажата")
+                                        }
+                                    )
                                 }
-                            }) {
-                                if let uiImage = UIImage(named: "right-button") {
-                                    Image(uiImage: uiImage)
-                                        .resizable()
-                                        .scaledToFit()
-                                        .frame(width: 60, height: 60)
-                                } else {
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 30, weight: .bold))
-                                        .foregroundColor(.brown)
-                                        .frame(width: 60, height: 60)
+                                
+                                // На кухне - кнопка "Кормить"
+                                if currentRoomIndex == 1 { // kitchen-game
+                                    ActionButton(
+                                        imageName: "kitchen-button",
+                                        action: {
+                                            // Проверяем уровень голода
+                                            if hungerValue > 0.5 {
+                                                // Если голод больше половины - показываем диалог
+                                                withAnimation {
+                                                    showNotHungryDialog = true
+                                                }
+                                            } else {
+                                                // Если голод меньше половины - открываем мини-игру
+                                                withAnimation {
+                                                    showFeedingGame = true
+                                                }
+                                            }
+                                            print("Кормить нажата")
+                                        }
+                                    )
                                 }
+                                
+                                // В гардеробной - кнопка "Одеть"
+                                if currentRoomIndex == 3 && !isChoosingSkin { // wear-game - показываем только когда не в режиме выбора
+                                    ActionButton(
+                                        imageName: "wear-button",
+                                        action: {
+                                            // Включаем режим выбора скина
+                                            withAnimation {
+                                                isChoosingSkin = true
+                                            }
+                                            print("Одеть нажата - режим выбора: \(isChoosingSkin)")
+                                        }
+                                    )
+                                }
+
                             }
-                        } else {
-                            // Пустое место, если стрелка не показывается
-                            Color.clear
-                                .frame(width: 60, height: 60)
+                            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: currentRoomIndex)
+                            
+                            // Кнопка "Вперед" (вправо) - показывается только если можно перейти вправо
+                            if canGoRight {
+                                Button(action: {
+                                    // Сбрасываем режим выбора скина при выходе из гардеробной
+                                    if currentRoomIndex == 3 {
+                                        isChoosingSkin = false
+                                    }
+                                    
+                                    rollDirection = 1.0 // Перекатывание вправо
+                                    isRolling = true
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+                                            if let rightIndex = getRightRoomIndex() {
+                                                currentRoomIndex = rightIndex
+                                            }
+                                        }
+                                    }
+                                    
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                                        isRolling = false
+                                    }
+                                }) {
+                                    if let uiImage = UIImage(named: "right-button") {
+                                        Image(uiImage: uiImage)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 60, height: 60)
+                                    } else {
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 30, weight: .bold))
+                                            .foregroundColor(.brown)
+                                            .frame(width: 60, height: 60)
+                                    }
+                                }
+                            } else {
+                                // Пустое место, если стрелка не показывается
+                                Color.clear
+                                    .frame(width: 60, height: 60)
+                            }
                         }
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 40)
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 40)
                 }
             }
         }
-        .onChange(of: currentRoomIndex) { newIndex in
-            // Закрываем интерфейс выбора одежды при выходе из гардеробной
-            if newIndex != 3 && showWearingInterface {
-                withAnimation {
-                    showWearingInterface = false
-                }
-            }
-        }
+
         .onAppear {
             startGameTimer()
             // Музыка продолжает играть, если еще не запущена
@@ -1539,6 +1693,10 @@ struct WashDialogView: View {
 struct GardenDialogView: View {
     @Binding var showDialog: Bool
     @Binding var showBattleChoice: Bool
+    @Binding var showBattle: Bool
+    @Binding var isOutside: Bool
+    @Binding var isInGarden: Bool
+    @Binding var currentRoomIndex: Int
     
     var body: some View {
         ZStack {
@@ -1617,6 +1775,10 @@ struct GardenDialogView: View {
 
 struct BattleChoiceView: View {
     @Binding var showBattleChoice: Bool
+    @Binding var showBattle: Bool
+    @Binding var isOutside: Bool
+    @Binding var isInGarden: Bool
+    @Binding var currentRoomIndex: Int
     
     var body: some View {
         ZStack {
@@ -1642,6 +1804,7 @@ struct BattleChoiceView: View {
                     Button(action: {
                         withAnimation {
                             showBattleChoice = false
+                            showBattle = true
                         }
                         print("Принять вызов нажата")
                     }) {
@@ -1665,8 +1828,12 @@ struct BattleChoiceView: View {
                     Button(action: {
                         withAnimation {
                             showBattleChoice = false
+                            // Возврат домой - в главную комнату
+                            isOutside = false
+                            isInGarden = false
+                            currentRoomIndex = 0
                         }
-                        print("Убежать нажата")
+                        print("Убежать нажата - возврат домой")
                     }) {
                         if let rejectImage = UIImage(named: "reject-button") {
                             Image(uiImage: rejectImage)
@@ -1692,6 +1859,387 @@ struct BattleChoiceView: View {
         .onTapGesture {
             // Игнорируем тап по фону, чтобы игрок осознанно выбрал кнопку
         }
+    }
+}
+
+// Экран боя
+struct BattleView: View {
+    @Binding var showBattle: Bool
+    @Binding var emotionValue: Double
+    
+    @State private var playerHealth: Double = 1.0 // Здоровье игрока (0.0 - 1.0)
+    @State private var enemyHealth: Double = 1.0 // Здоровье врага (0.0 - 1.0)
+    @State private var isAttacking = false // Флаг атаки
+    @State private var isDefending = false // Флаг защиты
+    @State private var isEnemyTurn = false // Флаг хода врага
+    @State private var playerPosition: CGFloat = 0.0 // Позиция игрока для анимации
+    @State private var enemyPosition: CGFloat = 0.0 // Позиция врага для анимации
+    @State private var canAct = true // Можно ли действовать
+    @State private var showVictory = false // Флаг для показа экрана победы
+    
+    private let attackDamage: Double = 0.15 // Урон от атаки
+    private let defenseReduction: Double = 0.5 // Снижение урона при защите
+    
+    var body: some View {
+        ZStack {
+            if showVictory {
+                VictoryView(showVictory: $showVictory, showBattle: $showBattle, emotionValue: $emotionValue)
+            } else {
+                battleContentView
+            }
+        }
+    }
+    
+    private var battleContentView: some View {
+        ZStack {
+            // Фон арены
+            if let uiImage = UIImage(named: "fight-arena") {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+            } else {
+                Color.red.opacity(0.3)
+                    .ignoresSafeArea()
+            }
+            
+            VStack(spacing: 0) {
+                // Прогресс-бары здоровья
+                HStack(spacing: 20) {
+                    // Здоровье игрока
+                    VStack(spacing: 8) {
+                        Text("ShaPou")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                        
+                        HealthBar(value: playerHealth, color: .green)
+                    }
+                    
+                    Spacer()
+                    
+                    // Здоровье врага
+                    VStack(spacing: 8) {
+                        Text("Враг")
+                            .font(.system(size: 18, weight: .bold, design: .rounded))
+                            .foregroundColor(.white)
+                            .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                        
+                        HealthBar(value: enemyHealth, color: .red)
+                    }
+                }
+                .padding(.horizontal, 30)
+                .padding(.top, 60)
+                .padding(.bottom, 20)
+                
+                Spacer()
+                
+                // Персонажи на арене
+                GeometryReader { geometry in
+                    HStack {
+                        // Игрок (слева)
+                        if let playerImage = UIImage(named: "normal-shapou") {
+                            Image(uiImage: playerImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 200, height: 200)
+                                .offset(x: playerPosition)
+                                .scaleEffect(isAttacking && !isEnemyTurn ? 1.1 : 1.0)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isAttacking)
+                        }
+                        
+                        Spacer()
+                        
+                        // Враг (справа)
+                        if let enemyImage = UIImage(named: "bad-hero") {
+                            Image(uiImage: enemyImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 200, height: 200)
+                                .offset(x: enemyPosition)
+                                .scaleEffect(isAttacking && isEnemyTurn ? 1.1 : 1.0)
+                                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isAttacking)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal, 40)
+                }
+                
+                Spacer()
+                
+                // Кнопки действий
+                HStack(spacing: 30) {
+                    // Кнопка атаки
+                    Button(action: {
+                        if canAct && !isEnemyTurn {
+                            performAttack()
+                        }
+                    }) {
+                        if let attackImage = UIImage(named: "button-fight") {
+                            Image(uiImage: attackImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 80)
+                        } else {
+                            Text("Атака")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 20)
+                                .background(Color.red)
+                                .cornerRadius(16)
+                        }
+                    }
+                    .disabled(!canAct || isEnemyTurn)
+                    .opacity((canAct && !isEnemyTurn) ? 1.0 : 0.5)
+                    
+                    // Кнопка защиты
+                    Button(action: {
+                        performDefense()
+                    }) {
+                        if let defenseImage = UIImage(named: "button-protection") {
+                            Image(uiImage: defenseImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 80)
+                        } else {
+                            Text("Защита")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 32)
+                                .padding(.vertical, 20)
+                                .background(Color.blue)
+                                .cornerRadius(16)
+                        }
+                    }
+                    .disabled(!canAct || isEnemyTurn)
+                    .opacity((canAct && !isEnemyTurn) ? 1.0 : 0.5)
+                }
+                .padding(.horizontal, 40)
+                .padding(.bottom, 50)
+            }
+        }
+        .onAppear {
+            // Запускаем музыку боя, если включена
+            MusicManager.shared.playMusic(fileName: "music-game", fileExtension: "mp3")
+        }
+    }
+    
+    // Выполнить атаку
+    private func performAttack() {
+        guard canAct && !isEnemyTurn else { return }
+        
+        canAct = false
+        isAttacking = true
+        
+        // Анимация приближения к врагу
+        withAnimation(.easeInOut(duration: 0.3)) {
+            playerPosition = 100 // Приближаемся к врагу
+        }
+        
+        // Удар
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            // Наносим урон врагу
+            withAnimation {
+                enemyHealth = max(0.0, enemyHealth - attackDamage)
+            }
+            
+            // Анимация отскока
+            withAnimation(.easeInOut(duration: 0.3)) {
+                playerPosition = 0
+            }
+            
+            // Проверяем победу
+            if enemyHealth <= 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    endBattle(victory: true)
+                }
+                return
+            }
+            
+            // Ход врага
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                isAttacking = false
+                enemyTurn()
+            }
+        }
+    }
+    
+    // Выполнить защиту
+    private func performDefense() {
+        guard canAct && !isEnemyTurn else { return }
+        
+        canAct = false
+        isDefending = true
+        
+        // Визуальная индикация защиты
+        withAnimation(.spring(response: 0.2, dampingFraction: 0.5)) {
+            // Можно добавить визуальный эффект защиты
+        }
+        
+        // Ход врага (защита снижает урон)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // Вызываем ход врага с флагом защиты
+            self.enemyTurn(playerIsDefending: true)
+            // Сбрасываем флаг защиты после передачи в enemyTurn
+            self.isDefending = false
+        }
+    }
+    
+    // Ход врага
+    private func enemyTurn(playerIsDefending: Bool = false) {
+        isEnemyTurn = true
+        isAttacking = true
+        
+        // Анимация приближения врага
+        withAnimation(.easeInOut(duration: 0.3)) {
+            enemyPosition = -100 // Враг приближается к игроку
+        }
+        
+        // Удар врага
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            // Рассчитываем урон с учетом защиты
+            let damage = playerIsDefending ? self.attackDamage * self.defenseReduction : self.attackDamage
+            
+            // Наносим урон игроку
+            withAnimation {
+                self.playerHealth = max(0.0, self.playerHealth - damage)
+            }
+            
+            // Анимация отскока
+            withAnimation(.easeInOut(duration: 0.3)) {
+                self.enemyPosition = 0
+            }
+            
+            // Проверяем поражение
+            if self.playerHealth <= 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    self.endBattle(victory: false)
+                }
+                return
+            }
+            
+            // Возвращаем ход игроку
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                self.isAttacking = false
+                self.isEnemyTurn = false
+                self.canAct = true
+                self.isDefending = false // Убеждаемся, что флаг защиты сброшен
+            }
+        }
+    }
+    
+    // Завершить бой
+    private func endBattle(victory: Bool) {
+        if victory {
+            // Победа - показываем экран победы
+            withAnimation {
+                showVictory = true
+            }
+        } else {
+            // Поражение - просто закрываем бой
+            withAnimation {
+                showBattle = false
+            }
+        }
+    }
+}
+
+// Экран победы
+struct VictoryView: View {
+    @Binding var showVictory: Bool
+    @Binding var showBattle: Bool
+    @Binding var emotionValue: Double
+    
+    var body: some View {
+        ZStack {
+            // Фон арены
+            if let uiImage = UIImage(named: "fight-arena") {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+            } else {
+                Color.red.opacity(0.3)
+                    .ignoresSafeArea()
+            }
+            
+            // Злодей на заднем плане
+            VStack {
+                Spacer()
+                
+                if let enemyImage = UIImage(named: "bad-hero") {
+                    Image(uiImage: enemyImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 300, height: 300)
+                        .padding(.bottom, 100)
+                }
+            }
+        }
+        .onAppear {
+            // Увеличиваем эмоции при победе
+            emotionValue = min(1.0, emotionValue + 0.3)
+            
+            // Воспроизводим звук победы
+            DialogueManager.shared.playSingleDialogue(
+                fileName: "afterwin-dialog",
+                fileExtension: "wav"
+            ) {
+                // После окончания звука закрываем экран победы и возвращаемся в игру
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    withAnimation {
+                        showVictory = false
+                        showBattle = false
+                    }
+                }
+            }
+        }
+        .onTapGesture {
+            // Можно закрыть по тапу
+            DialogueManager.shared.stopDialogue()
+            withAnimation {
+                showVictory = false
+                showBattle = false
+            }
+        }
+    }
+}
+
+// Прогресс-бар здоровья
+struct HealthBar: View {
+    let value: Double // Значение от 0.0 до 1.0
+    let color: Color
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                // Фон прогресс-бара
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black.opacity(0.5))
+                    .frame(height: 30)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(0.3), lineWidth: 2)
+                    )
+                
+                // Заполненная часть
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(color)
+                    .frame(width: geometry.size.width * CGFloat(value), height: 30)
+                    .shadow(color: color.opacity(0.5), radius: 4, x: 0, y: 2)
+                    .animation(.spring(response: 0.3, dampingFraction: 0.7), value: value)
+                
+                // Текст с процентом
+                Text("\(Int(value * 100))%")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        .frame(height: 30)
+        .frame(maxWidth: 200)
     }
 }
 
@@ -1732,6 +2280,531 @@ struct ActionButton: View {
             }
         }
         .buttonStyle(PlainButtonStyle())
+    }
+}
+
+// Экран настроек
+struct SettingsView: View {
+    @Environment(\.dismiss) var dismiss
+    @ObservedObject private var musicManager = MusicManager.shared
+    @State private var showAbout = false
+    @State private var showPrivacy = false
+    @State private var showTerms = false
+    
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                // Фоновое изображение для настроек
+                Image("for-settings")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                    .ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    // Заголовок с учетом safe area
+                    HStack(spacing: 0) {
+                        Text("Настройки")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                            .padding(.leading, 20)
+                        
+                        Spacer()
+                        
+                        // Кнопка закрытия
+                        Button(action: {
+                            dismiss()
+                        }) {
+                            if let uiImage = UIImage(named: "close-button") {
+                                Image(uiImage: uiImage)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 50, height: 50)
+                            } else {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 35))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                            }
+                        }
+                        .padding(.trailing, 20)
+                    }
+                    .padding(.top, geometry.safeAreaInsets.top > 0 ? geometry.safeAreaInsets.top + 10 : 60)
+                    .padding(.bottom, 20)
+                    
+                    // Список настроек на фоне for-settings.png
+                    ScrollView {
+                        VStack(spacing: 16) {
+                            // Переключатель музыки
+                            SettingsRow(
+                                iconImageName: "settings-music",
+                                title: "Музыка",
+                                subtitle: "Включить фоновую музыку",
+                                action: {
+                                    withAnimation {
+                                        musicManager.isMusicEnabled.toggle()
+                                    }
+                                },
+                                trailing: {
+                                    Toggle("", isOn: Binding(
+                                        get: { musicManager.isMusicEnabled },
+                                        set: { _ in musicManager.isMusicEnabled.toggle() }
+                                    ))
+                                    .toggleStyle(SwitchToggleStyle(tint: Color(red: 1.0, green: 0.6, blue: 0.2)))
+                                }
+                            )
+                            
+                            // О приложении
+                            SettingsRow(
+                                iconImageName: "settings-info",
+                                title: "О приложении",
+                                subtitle: "Версия и информация о разработчике",
+                                action: {
+                                    showAbout = true
+                                },
+                                trailing: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.6))
+                                }
+                            )
+                            
+                            // Политика конфиденциальности
+                            SettingsRow(
+                                iconImageName: "settings-policy",
+                                title: "Политика конфиденциальности",
+                                subtitle: "Как мы обрабатываем ваши данные",
+                                action: {
+                                    showPrivacy = true
+                                },
+                                trailing: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.6))
+                                }
+                            )
+                            
+                            // Условия использования
+                            SettingsRow(
+                                iconImageName: "settings-docs",
+                                title: "Условия использования",
+                                subtitle: "Правила использования приложения",
+                                action: {
+                                    showTerms = true
+                                },
+                                trailing: {
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.6))
+                                }
+                            )
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                        .padding(.bottom, geometry.safeAreaInsets.bottom > 0 ? geometry.safeAreaInsets.bottom + 20 : 40)
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showAbout) {
+            AboutView()
+        }
+        .sheet(isPresented: $showPrivacy) {
+            PrivacyPolicyView()
+        }
+        .sheet(isPresented: $showTerms) {
+            TermsOfUseView()
+        }
+    }
+}
+
+// Строка настроек
+struct SettingsRow<Content: View>: View {
+    let iconImageName: String
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+    let trailing: () -> Content
+    
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 15) {
+                // Иконка
+                if let uiImage = UIImage(named: iconImageName) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 50, height: 50)
+                } else {
+                    // Fallback, если изображение не найдено
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color(red: 1.0, green: 0.8, blue: 0.6).opacity(0.8))
+                            .frame(width: 50, height: 50)
+                        
+                        Image(systemName: "questionmark.circle")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                    }
+                }
+                
+                // Текст
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 20, weight: .semibold, design: .rounded))
+                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                    
+                    Text(subtitle)
+                        .font(.system(size: 14, weight: .regular))
+                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.7))
+                }
+                
+                Spacer()
+                
+                // Trailing контент
+                trailing()
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 16)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color.white)
+                    .shadow(color: .black.opacity(0.1), radius: 5, x: 0, y: 2)
+            )
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+}
+
+// Экран "О приложении"
+struct AboutView: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var appVersion: String {
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            return version
+        }
+        return "1.0"
+    }
+    
+    var buildNumber: String {
+        if let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
+            return build
+        }
+        return "1"
+    }
+    
+    var body: some View {
+        ZStack {
+            // Белый фон
+            Color.white
+                .ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                // Заголовок
+                HStack {
+                    Text("О приложении")
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        .padding(.leading, 30)
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        if let uiImage = UIImage(named: "close-button") {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 50, height: 50)
+                        } else {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 35))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        }
+                    }
+                    .padding(.trailing, 30)
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 30)
+                
+                ScrollView {
+                    VStack(spacing: 25) {
+                        // Иконка приложения
+                        if let uiImage = UIImage(named: "normal-shapou") {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 120, height: 120)
+                                .padding(.top, 20)
+                        }
+                        
+                        // Название приложения
+                        Text("ShaPou")
+                            .font(.system(size: 42, weight: .bold, design: .rounded))
+                            .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        
+                        // Версия
+                        VStack(spacing: 8) {
+                            Text("Версия \(appVersion)")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                            
+                            Text("Сборка \(buildNumber)")
+                                .font(.system(size: 14, weight: .regular))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.7))
+                        }
+                        .padding(.top, 10)
+                        
+                        Divider()
+                            .background(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.3))
+                            .padding(.horizontal, 40)
+                            .padding(.vertical, 20)
+                        
+                        // Разработчики
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Разработчики")
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                            
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Шкель Тихон")
+                                    .font(.system(size: 18, weight: .regular))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                                
+                                Text("Тихонович Даниил")
+                                    .font(.system(size: 18, weight: .regular))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                                
+                                Text("Лусевич Арсений")
+                                    .font(.system(size: 18, weight: .regular))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                                
+                                Text("Круглик Виолетта")
+                                    .font(.system(size: 18, weight: .regular))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                                
+                                Text("Лютаревич Ульяна")
+                                    .font(.system(size: 18, weight: .regular))
+                                    .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 30)
+                        
+                        // Описание
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Описание")
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                            
+                            Text("ShaPou - это увлекательная игра-симулятор, где вы заботитесь о милом персонаже. Кормите, мойте, играйте и следите за его настроением!")
+                                .font(.system(size: 16, weight: .regular))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                                .lineSpacing(4)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 30)
+                        .padding(.top, 10)
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+    }
+}
+
+// Экран "Политика конфиденциальности"
+struct PrivacyPolicyView: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        ZStack {
+            // Белый фон
+            Color.white
+                .ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                // Заголовок
+                HStack {
+                    Text("Политика конфиденциальности")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        .padding(.leading, 30)
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        if let uiImage = UIImage(named: "close-button") {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 50, height: 50)
+                        } else {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 35))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        }
+                    }
+                    .padding(.trailing, 30)
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 20)
+                
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("Последнее обновление: \(Date().formatted(date: .abbreviated, time: .omitted))")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.6))
+                            .padding(.horizontal, 30)
+                        
+                        VStack(alignment: .leading, spacing: 16) {
+                            SectionView(
+                                title: "1. Сбор информации",
+                                content: "Приложение ShaPou не собирает и не передает личные данные пользователей. Все данные хранятся локально на вашем устройстве."
+                            )
+                            
+                            SectionView(
+                                title: "2. Использование данных",
+                                content: "Мы не используем ваши личные данные для каких-либо целей. Все настройки и прогресс игры сохраняются только на вашем устройстве."
+                            )
+                            
+                            SectionView(
+                                title: "3. Безопасность",
+                                content: "Мы прилагаем все усилия для обеспечения безопасности ваших данных. Все данные хранятся локально и не передаются третьим лицам."
+                            )
+                            
+                            SectionView(
+                                title: "4. Изменения в политике",
+                                content: "Мы оставляем за собой право вносить изменения в данную политику конфиденциальности. О любых изменениях мы уведомим пользователей через обновление приложения."
+                            )
+                            
+                            SectionView(
+                                title: "5. Контакты",
+                                content: "Если у вас есть вопросы относительно политики конфиденциальности, пожалуйста, свяжитесь с нами через официальные каналы поддержки."
+                            )
+                        }
+                        .padding(.horizontal, 30)
+                        .padding(.top, 10)
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+    }
+}
+
+// Экран "Условия использования"
+struct TermsOfUseView: View {
+    @Environment(\.dismiss) var dismiss
+    
+    var body: some View {
+        ZStack {
+            // Белый фон
+            Color.white
+                .ignoresSafeArea()
+            
+            VStack(spacing: 0) {
+                // Заголовок
+                HStack {
+                    Text("Условия использования")
+                        .font(.system(size: 28, weight: .bold, design: .rounded))
+                        .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        .padding(.leading, 30)
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        dismiss()
+                    }) {
+                        if let uiImage = UIImage(named: "close-button") {
+                            Image(uiImage: uiImage)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 50, height: 50)
+                        } else {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 35))
+                                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+                        }
+                    }
+                    .padding(.trailing, 30)
+                }
+                .padding(.top, 20)
+                .padding(.bottom, 20)
+                
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
+                        Text("Последнее обновление: \(Date().formatted(date: .abbreviated, time: .omitted))")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.6))
+                            .padding(.horizontal, 30)
+                        
+                        VStack(alignment: .leading, spacing: 16) {
+                            SectionView(
+                                title: "1. Принятие условий",
+                                content: "Используя приложение ShaPou, вы соглашаетесь с данными условиями использования. Если вы не согласны с этими условиями, пожалуйста, не используйте приложение."
+                            )
+                            
+                            SectionView(
+                                title: "2. Использование приложения",
+                                content: "Приложение предназначено для личного использования. Вы не можете копировать, модифицировать, распространять или продавать приложение или его части без разрешения разработчика."
+                            )
+                            
+                            SectionView(
+                                title: "3. Ограничение ответственности",
+                                content: "Разработчик не несет ответственности за любые прямые или косвенные убытки, возникшие в результате использования или невозможности использования приложения."
+                            )
+                            
+                            SectionView(
+                                title: "4. Изменения в приложении",
+                                content: "Разработчик оставляет за собой право изменять, обновлять или прекращать работу приложения в любое время без предварительного уведомления."
+                            )
+                            
+                            SectionView(
+                                title: "5. Интеллектуальная собственность",
+                                content: "Все права на приложение, включая дизайн, графику, музыку и код, принадлежат разработчику и защищены законами об авторском праве."
+                            )
+                            
+                            SectionView(
+                                title: "6. Контакты",
+                                content: "По вопросам, связанным с условиями использования, пожалуйста, свяжитесь с нами через официальные каналы поддержки."
+                            )
+                        }
+                        .padding(.horizontal, 30)
+                        .padding(.top, 10)
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+    }
+}
+
+// Компонент для секций в политике и условиях
+struct SectionView: View {
+    let title: String
+    let content: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15))
+            
+            Text(content)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundColor(Color(red: 0.4, green: 0.25, blue: 0.15).opacity(0.8))
+                .lineSpacing(4)
+        }
+        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(red: 0.95, green: 0.95, blue: 0.95))
+        )
     }
 }
 
